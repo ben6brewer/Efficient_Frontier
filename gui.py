@@ -99,11 +99,14 @@ class MainWindow(QMainWindow):
         self.corr_button.clicked.connect(self.show_correlation_matrix)
         self.cov_button = QPushButton("Covariance")
         self.cov_button.clicked.connect(self.show_covariance_matrix)
-        for btn in (self.frontier_button, self.corr_button, self.cov_button):
+        self.returns_button = QPushButton("Returns")
+        self.returns_button.clicked.connect(lambda: self.show_page("returns"))
+        for btn in (self.frontier_button, self.corr_button, self.cov_button, self.returns_button):
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         nav_layout.addWidget(self.frontier_button)
         nav_layout.addWidget(self.corr_button)
         nav_layout.addWidget(self.cov_button)
+        nav_layout.addWidget(self.returns_button)
         left_layout.addLayout(nav_layout)
 
         # Portfolio buttons
@@ -169,6 +172,12 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda checked, l=label: self.set_lookback(l))
             lookback_layout.addWidget(btn)
             self.lookback_buttons[label] = btn
+
+        self.custom_lookback_input = QLineEdit()
+        self.custom_lookback_input.setPlaceholderText("Years")
+        self.custom_lookback_input.setFixedWidth(60)
+        self.custom_lookback_input.textChanged.connect(self.set_custom_lookback)
+        lookback_layout.addWidget(self.custom_lookback_input)
 
         self.lookback_buttons["5y"].setChecked(True)
         self.selected_lookback = 1825
@@ -264,6 +273,25 @@ class MainWindow(QMainWindow):
         cov_layout.addWidget(self.cov_plot)
         self.stack.addWidget(cov_page)  # index 2
 
+        # --- Page 3: Returns Plot ---
+        returns_page = QWidget()
+        returns_layout = QVBoxLayout(returns_page)
+        returns_title = QLabel("Cumulative Returns")
+        returns_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        font = returns_title.font()
+        font.setBold(True)
+        returns_title.setFont(font)
+        returns_layout.addWidget(returns_title)
+        self.returns_plot = pg.PlotWidget(
+            axisItems={'bottom': pg.DateAxisItem(orientation='bottom')}
+        )
+        self.returns_plot.setLabel('left', 'Return (%)')
+        self.returns_plot.setLabel('bottom', 'Date')
+        self.returns_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.returns_legend = self.returns_plot.addLegend()
+        returns_layout.addWidget(self.returns_plot)
+        self.stack.addWidget(returns_page)  # index 3
+
         self.loaded_portfolio_name = None
 
         self.update_lookback_styles()
@@ -274,7 +302,25 @@ class MainWindow(QMainWindow):
         self.selected_lookback = self.LOOKBACK_MAP[label]
         for key, btn in self.lookback_buttons.items():
             btn.setChecked(key == label)
+        self.custom_lookback_input.blockSignals(True)
+        self.custom_lookback_input.clear()
+        self.custom_lookback_input.blockSignals(False)
         self.update_lookback_styles()
+
+    def set_custom_lookback(self, text):
+        text = text.strip()
+        if not text:
+            return
+        try:
+            years = float(text)
+            if years <= 0:
+                return
+            self.selected_lookback = round(years * 365)
+            for btn in self.lookback_buttons.values():
+                btn.setChecked(False)
+            self.update_lookback_styles()
+        except ValueError:
+            pass
 
     def update_lookback_styles(self):
         for key, btn in self.lookback_buttons.items():
@@ -284,7 +330,7 @@ class MainWindow(QMainWindow):
                 btn.setStyleSheet("")
 
     def show_page(self, page):
-        pages = {"frontier": 0, "correlation": 1, "covariance": 2}
+        pages = {"frontier": 0, "correlation": 1, "covariance": 2, "returns": 3}
         self.stack.setCurrentIndex(pages[page])
 
     def toggle_left_panel(self):
@@ -596,7 +642,7 @@ class MainWindow(QMainWindow):
         try:
             _, daily_returns = self.compute_daily_returns(tickers, self.selected_lookback)
             corr = daily_returns.corr()
-            self.populate_matrix_plot(self.corr_plot, self.corr_image, 'corr_text_items', corr, ".2f")
+            self.populate_matrix_plot(self.corr_plot, self.corr_image, 'corr_text_items', corr, ".3f")
             self.left_panel.hide()
             self.left_toggle.setText("▶")
             self.show_page("correlation")
@@ -627,6 +673,43 @@ class MainWindow(QMainWindow):
                                  f"Failed to compute covariance matrix:\n{str(e)}")
         finally:
             QApplication.restoreOverrideCursor()
+
+    def plot_returns(self):
+        """Plot cumulative returns for all tickers, normalized to common start date."""
+        tickers = self.get_tickers()
+        if not tickers:
+            return
+
+        # Get price data using existing compute_daily_returns()
+        prices, _ = self.compute_daily_returns(tickers, self.selected_lookback)
+
+        # Find the common start date (latest start among all tickers)
+        # This handles tickers with less data than lookback
+        common_start = prices.apply(lambda col: col.first_valid_index()).max()
+
+        # Trim all data to start from common date
+        prices = prices.loc[common_start:]
+
+        # Calculate cumulative returns: (price / first_price - 1) * 100
+        cumulative_returns = (prices / prices.iloc[0] - 1) * 100
+
+        # Clear previous plot and re-add legend
+        self.returns_plot.clear()
+        self.returns_legend = self.returns_plot.addLegend()
+
+        # Use distinct colors for each ticker
+        colors = ['#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231',
+                  '#911eb4', '#42d4f4', '#f032e6', '#bfef45', '#fabed4',
+                  '#469990', '#dcbeff', '#9A6324', '#fffac8', '#800000',
+                  '#aaffc3', '#808000', '#ffd8b1', '#000075', '#a9a9a9']
+
+        for i, ticker in enumerate(tickers):
+            color = colors[i % len(colors)]
+            dates = cumulative_returns.index
+            # Convert dates to timestamps for pyqtgraph DateAxisItem
+            x_vals = np.array([d.timestamp() for d in dates])
+            y_vals = cumulative_returns[ticker].values
+            self.returns_plot.plot(x_vals, y_vals, pen=pg.mkPen(color, width=2), name=ticker)
 
     def compute_daily_returns(self, tickers, lookback_days=1825):
         """Fetch price data and compute daily returns for given tickers."""
@@ -826,6 +909,9 @@ class MainWindow(QMainWindow):
             self.populate_matrix_plot(self.corr_plot, self.corr_image, 'corr_text_items', corr, ".2f")
             cov = daily_returns.cov() * 252
             self.populate_matrix_plot(self.cov_plot, self.cov_image, 'cov_text_items', cov, ".4f")
+
+            # Plot cumulative returns
+            self.plot_returns()
 
             self.export_outputs(tickers)
 
